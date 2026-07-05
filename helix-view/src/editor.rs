@@ -2572,6 +2572,18 @@ impl Editor {
         }
     }
 
+    /// Restore a previous cursor position in the current buffer without using the jumplist.
+    pub fn cursor_anchor_back(&mut self, view_id: ViewId, count: usize) {
+        let scrolloff = self.config.load().scrolloff;
+        let view = view_mut!(self, view_id);
+        let doc = doc_mut!(self, &view.doc);
+        let selection = view.pop_cursor_anchors(doc, count);
+        if let Some(selection) = selection {
+            doc.set_selection(view_id, selection);
+            view.ensure_cursor_in_view_center(doc, scrolloff);
+        }
+    }
+
     fn jump_to(&mut self, view_id: ViewId, jump: Jump) {
         let selection = jump.selection(doc!(self, &jump.doc_id));
         let old_doc_id = view!(self, view_id).doc;

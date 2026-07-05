@@ -533,6 +533,7 @@ impl MappableCommand {
         select_all_children, "Select all children of the current node",
         jump_forward, "Jump forward on jumplist",
         jump_backward, "Jump backward on jumplist",
+        cursor_anchor_back, "Restore previous cursor position in buffer",
         save_selection, "Save current selection to jumplist",
         jump_view_right, "Jump to right split",
         jump_view_left, "Jump to left split",
@@ -1662,6 +1663,7 @@ fn find_char_line_ending_motion(
     extend: bool,
 ) {
     let (view, doc) = current!(editor);
+    record_cursor_anchor(view, doc);
     let text = doc.text().slice(..);
 
     let selection = doc.selection(view.id).clone().transform(|range| {
@@ -1730,6 +1732,7 @@ fn find_char(cx: &mut Context, direction: Direction, inclusive: bool, extend: bo
         } {
             Box::new(move |editor: &mut Editor| {
                 let (view, doc) = current!(editor);
+                record_cursor_anchor(view, doc);
                 let text = doc.text().slice(..);
 
                 let selection = doc.selection(view.id).clone().transform(|range| {
@@ -2259,8 +2262,12 @@ fn search_impl(
     scrolloff: usize,
     wrap_around: bool,
     show_warnings: bool,
+    record_anchor: bool,
 ) {
     let (view, doc) = current!(editor);
+    if record_anchor {
+        record_cursor_anchor(view, doc);
+    }
     let text = doc.text().slice(..);
     let selection = doc.selection(view.id);
 
@@ -2389,6 +2396,7 @@ fn searcher(cx: &mut Context, direction: Direction) {
                 scrolloff,
                 wrap_around,
                 false,
+                event == PromptEvent::Validate,
             );
         },
     );
@@ -2419,6 +2427,8 @@ fn search_next_or_prev_impl(cx: &mut Context, movement: Movement, direction: Dir
             )
             .build(&query)
         {
+            let (view, doc) = current!(cx.editor);
+            record_cursor_anchor(view, doc);
             for _ in 0..count {
                 search_impl(
                     cx.editor,
@@ -2428,6 +2438,7 @@ fn search_next_or_prev_impl(cx: &mut Context, movement: Movement, direction: Dir
                     scrolloff,
                     wrap_around,
                     true,
+                    false,
                 );
             }
         } else {
@@ -3980,6 +3991,11 @@ fn normal_mode(cx: &mut Context) {
 // Store a jump on the jumplist.
 fn push_jump(view: &mut View, doc: &mut Document) {
     view.push_jump(doc);
+}
+
+/// Record the current selection for same-buffer cursor recovery (`cursor_anchor_back`).
+fn record_cursor_anchor(view: &mut View, doc: &mut Document) {
+    view.record_cursor_anchor(doc, view.id);
 }
 
 fn goto_line(cx: &mut Context) {
@@ -5885,6 +5901,7 @@ fn select_all_children(cx: &mut Context) {
 
 fn match_brackets(cx: &mut Context) {
     let (view, doc) = current!(cx.editor);
+    record_cursor_anchor(view, doc);
     let is_select = cx.editor.mode == Mode::Select;
     let text = doc.text();
     let text_slice = text.slice(..);
@@ -5912,6 +5929,11 @@ fn jump_forward(cx: &mut Context) {
 
 fn jump_backward(cx: &mut Context) {
     cx.editor.jump_backward(cx.editor.tree.focus, cx.count());
+}
+
+fn cursor_anchor_back(cx: &mut Context) {
+    cx.editor
+        .cursor_anchor_back(cx.editor.tree.focus, cx.count());
 }
 
 fn save_selection(cx: &mut Context) {
@@ -6258,6 +6280,7 @@ fn select_textobject(cx: &mut Context, objtype: textobject::TextObject) {
         if let Some(ch) = event.char() {
             let textobject = move |editor: &mut Editor| {
                 let (view, doc) = current!(editor);
+                record_cursor_anchor(view, doc);
                 let loader = editor.syn_loader.load();
                 let text = doc.text().slice(..);
 

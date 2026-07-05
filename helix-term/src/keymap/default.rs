@@ -220,6 +220,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
 
         "C-i" | "tab" => jump_forward, // tab == <C-i>
         "C-o" => jump_backward,
+        "A-C-o" => cursor_anchor_back,
         "C-s" => save_selection,
 
         "space" => { "Space"

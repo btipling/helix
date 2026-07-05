@@ -16,9 +16,13 @@ use helix_core::{
     VisualOffsetError::{PosAfterMaxRow, PosBeforeAnchorRow},
 };
 
-use std::{collections::VecDeque, fmt};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt,
+};
 
 const JUMP_LIST_CAPACITY: usize = 30;
+const CURSOR_ANCHOR_CAPACITY: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Jump {
@@ -43,6 +47,43 @@ impl Jump {
     /// The selection of the jump in the current text of `doc`.
     pub fn selection(&self, doc: &Document) -> Selection {
         doc.map_selection_from_revision(&self.selection, self.revision)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CursorAnchor {
+    selection: Selection,
+    revision: usize,
+}
+
+/// Per-document stack of recent cursor positions for same-buffer recovery.
+/// Independent of the jumplist; used to undo mistaken smart-navigation moves.
+#[derive(Debug, Clone, Default)]
+pub struct CursorAnchorStack {
+    anchors: VecDeque<CursorAnchor>,
+}
+
+impl CursorAnchorStack {
+    pub fn push(&mut self, selection: Selection) {
+        self.push_at_revision(selection, 0);
+    }
+
+    fn push_at_revision(&mut self, selection: Selection, revision: usize) {
+        let anchor = CursorAnchor {
+            selection,
+            revision,
+        };
+        if self.anchors.back() == Some(&anchor) {
+            return;
+        }
+        if self.anchors.len() >= CURSOR_ANCHOR_CAPACITY {
+            self.anchors.pop_front();
+        }
+        self.anchors.push_back(anchor);
+    }
+
+    pub fn pop(&mut self) -> Option<Selection> {
+        self.anchors.pop_back().map(|a| a.selection)
     }
 }
 
@@ -144,6 +185,8 @@ pub struct View {
     pub area: Rect,
     pub doc: DocumentId,
     pub jumps: JumpList,
+    /// Recent cursor positions per document for same-buffer recovery (`cursor_anchor_back`).
+    cursor_anchors: HashMap<DocumentId, CursorAnchorStack>,
     // documents accessed from this view from the oldest one to last viewed one
     pub docs_access_history: Vec<DocumentId>,
     /// the last modified files before the current one
@@ -186,6 +229,7 @@ impl View {
                 selection: Selection::point(0),
                 revision: 0,
             }), // TODO: use actual sel
+            cursor_anchors: HashMap::new(),
             docs_access_history: Vec::new(),
             last_modified_docs: [None, None],
             object_selections: Vec::new(),
@@ -642,6 +686,7 @@ impl View {
 
     pub fn remove_document(&mut self, doc_id: &DocumentId) {
         self.jumps.remove(doc_id);
+        self.cursor_anchors.remove(doc_id);
         self.docs_access_history.retain(|doc| doc != doc_id);
     }
 
@@ -665,6 +710,31 @@ impl View {
     //         (None, None) => return,
     //     }
     // }
+
+    /// Records the current selection as a cursor anchor for the given document.
+    pub fn record_cursor_anchor(&mut self, doc: &mut Document, view_id: ViewId) {
+        doc.append_changes_to_history(self);
+        let selection = doc.selection(view_id).clone();
+        let stack = self.cursor_anchors.entry(doc.id()).or_default();
+        if stack
+            .anchors
+            .back()
+            .is_some_and(|a| doc.map_selection_from_revision(&a.selection, a.revision) == selection)
+        {
+            return;
+        }
+        stack.push_at_revision(selection, doc.current_revision());
+    }
+
+    /// Pops up to `count` cursor anchors for `doc`, returning the last popped selection.
+    pub fn pop_cursor_anchors(&mut self, doc: &Document, count: usize) -> Option<Selection> {
+        let stack = self.cursor_anchors.get_mut(&doc.id())?;
+        let mut anchor = None;
+        for _ in 0..count {
+            anchor = stack.anchors.pop_back();
+        }
+        anchor.map(|a| doc.map_selection_from_revision(&a.selection, a.revision))
+    }
 
     /// Adds the current selection of `doc` to the jumplist. Pending changes are committed to
     /// the document's history first since a jump refers to a history revision.
@@ -1178,5 +1248,47 @@ mod tests {
         doc.append_changes_to_history(&mut view2);
         doc.undo(&mut view2);
         assert_eq!(jump_pos(&view1, &doc), 6);
+    }
+
+    #[test]
+    fn cursor_anchor_stack_capacity_and_dedup() {
+        let mut stack = CursorAnchorStack::default();
+        for i in 0..6 {
+            stack.push(Selection::point(i));
+        }
+        // Capacity is 5: pushing 0..6 drops 0, leaving 1..5 on the stack.
+        assert_eq!(stack.pop(), Some(Selection::point(5)));
+        assert_eq!(stack.pop(), Some(Selection::point(4)));
+        assert_eq!(stack.pop(), Some(Selection::point(3)));
+        assert_eq!(stack.pop(), Some(Selection::point(2)));
+        assert_eq!(stack.pop(), Some(Selection::point(1)));
+        assert_eq!(stack.pop(), None);
+
+        stack.push(Selection::point(10));
+        stack.push(Selection::point(10));
+        assert_eq!(stack.pop(), Some(Selection::point(10)));
+        assert_eq!(stack.pop(), None);
+    }
+
+    #[test]
+    fn cursor_anchor_record_and_pop() {
+        let config = Arc::new(ArcSwap::new(Arc::new(Config::default())));
+        let loader = Arc::new(ArcSwap::from_pointee(syntax::Loader::default()));
+        let mut doc = Document::from(Rope::from_str("hello"), None, config, loader);
+        let mut view = View::new(doc.id(), GutterConfig::default());
+        doc.ensure_view_init(view.id);
+        doc.set_selection(view.id, Selection::point(0));
+
+        view.record_cursor_anchor(&mut doc, view.id);
+        let first_head = doc.selection(view.id).primary().head;
+        doc.set_selection(view.id, Selection::point(3));
+        view.record_cursor_anchor(&mut doc, view.id);
+        let second_head = doc.selection(view.id).primary().head;
+
+        let restored = view.pop_cursor_anchors(&doc, 1).unwrap();
+        assert_eq!(restored.primary().head, second_head);
+        let restored = view.pop_cursor_anchors(&doc, 1).unwrap();
+        assert_eq!(restored.primary().head, first_head);
+        assert_eq!(view.pop_cursor_anchors(&doc, 1), None);
     }
 }
