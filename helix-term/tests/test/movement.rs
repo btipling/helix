@@ -842,3 +842,59 @@ async fn tree_sitter_motions_work_across_injections() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cursor_anchor_back() -> anyhow::Result<()> {
+    // Recover cursor position after a mistaken find-char.
+    test(("#[a|]#,b,c,d,e", "f,<A-C-o>", "#[a|]#,b,c,d,e")).await?;
+
+    // Recover from mistyped count (wanted 4f,, typed 3f,).
+    test((
+        "#[a|]#,b,c,d,e",
+        "3f,<A-C-o>",
+        "#[a|]#,b,c,d,e",
+    ))
+    .await?;
+
+    // Recover from mistyped visual find (wanted v4f,, typed v3f,).
+    test((
+        "#[a|]#,b,c,d,e",
+        "v3f,<A-C-o>",
+        "#[a|]#,b,c,d,e",
+    ))
+    .await?;
+
+    // Recover within a line after a mistaken find on a multiline buffer.
+    test((
+        indoc! {"
+            aaa
+            bbb
+            cc#[c|]#,ddd
+        "},
+        "f,<A-C-o>",
+        indoc! {"
+            aaa
+            bbb
+            cc#[c|]#,ddd
+        "},
+    ))
+    .await?;
+
+    // Recover after navigating away and back within the buffer before a mistaken find.
+    test((
+        indoc! {"
+            aaa
+            bbb
+            cc#[c|]#,ddd
+        "},
+        "gg2j2lf,<A-C-o>",
+        indoc! {"
+            aaa
+            bbb
+            cc#[c|]#,ddd
+        "},
+    ))
+    .await?;
+
+    Ok(())
+}
